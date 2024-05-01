@@ -3,23 +3,33 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import 'vs/css!./media/developer';
 import { VSBuffer } from 'vs/base/common/buffer';
+import { Disposable, IDisposable, MutableDisposable, combinedDisposable, dispose } from 'vs/base/common/lifecycle';
 import { URI } from 'vs/base/common/uri';
-import { localize } from 'vs/nls';
+import { localize, localize2 } from 'vs/nls';
 import { Categories } from 'vs/platform/action/common/actionCommonCategories';
+import { IConfigurationService } from 'vs/platform/configuration/common/configuration';
 import { ContextKeyExpr } from 'vs/platform/contextkey/common/contextkey';
 import { IFileService } from 'vs/platform/files/common/files';
 import { IOpenerService } from 'vs/platform/opener/common/opener';
 import { IQuickInputService } from 'vs/platform/quickinput/common/quickInput';
+import { ITerminalLogService, TerminalSettingId } from 'vs/platform/terminal/common/terminal';
 import { IWorkspaceContextService } from 'vs/platform/workspace/common/workspace';
-import { IInternalXtermTerminal } from 'vs/workbench/contrib/terminal/browser/terminal';
+import { IInternalXtermTerminal, ITerminalContribution, ITerminalInstance, IXtermTerminal } from 'vs/workbench/contrib/terminal/browser/terminal';
 import { registerTerminalAction } from 'vs/workbench/contrib/terminal/browser/terminalActions';
-import { TerminalCommandId } from 'vs/workbench/contrib/terminal/common/terminal';
+import { registerTerminalContribution } from 'vs/workbench/contrib/terminal/browser/terminalExtensions';
+import { TerminalWidgetManager } from 'vs/workbench/contrib/terminal/browser/widgets/widgetManager';
+import { ITerminalProcessManager } from 'vs/workbench/contrib/terminal/common/terminal';
 import { TerminalContextKeys } from 'vs/workbench/contrib/terminal/common/terminalContextKey';
+import type { Terminal } from '@xterm/xterm';
+import { ITerminalCommand, TerminalCapability, type ICommandDetectionCapability } from 'vs/platform/terminal/common/capabilities/capabilities';
+import { IStatusbarService, StatusbarAlignment, type IStatusbarEntry, type IStatusbarEntryAccessor } from 'vs/workbench/services/statusbar/browser/statusbar';
+import { TerminalDeveloperCommandId } from 'vs/workbench/contrib/terminalContrib/developer/common/terminal.developer';
 
 registerTerminalAction({
-	id: TerminalCommandId.ShowTextureAtlas,
-	title: { value: localize('workbench.action.terminal.showTextureAtlas', "Show Terminal Texture Atlas"), original: 'Show Terminal Texture Atlas' },
+	id: TerminalDeveloperCommandId.ShowTextureAtlas,
+	title: localize2('workbench.action.terminal.showTextureAtlas', 'Show Terminal Texture Atlas'),
 	category: Categories.Developer,
 	precondition: ContextKeyExpr.or(TerminalContextKeys.isOpen),
 	run: async (c, accessor) => {
@@ -50,8 +60,8 @@ registerTerminalAction({
 });
 
 registerTerminalAction({
-	id: TerminalCommandId.WriteDataToTerminal,
-	title: { value: localize('workbench.action.terminal.writeDataToTerminal', "Write Data to Terminal"), original: 'Write Data to Terminal' },
+	id: TerminalDeveloperCommandId.WriteDataToTerminal,
+	title: localize2('workbench.action.terminal.writeDataToTerminal', 'Write Data to Terminal'),
 	category: Categories.Developer,
 	run: async (c, accessor) => {
 		const quickInputService = accessor.get(IQuickInputService);
@@ -83,3 +93,176 @@ registerTerminalAction({
 		xterm._writeText(escapedData);
 	}
 });
+
+
+registerTerminalAction({
+	id: TerminalDeveloperCommandId.RestartPtyHost,
+	title: localize2('workbench.action.terminal.restartPtyHost', 'Restart Pty Host'),
+	category: Categories.Developer,
+	run: async (c, accessor) => {
+		const logService = accessor.get(ITerminalLogService);
+		const backends = Array.from(c.instanceService.getRegisteredBackends());
+		const unresponsiveBackends = backends.filter(e => !e.isResponsive);
+		// Restart only unresponsive backends if there are any
+		const restartCandidates = unresponsiveBackends.length > 0 ? unresponsiveBackends : backends;
+		for (const backend of restartCandidates) {
+			logService.warn(`Restarting pty host for authority "${backend.remoteAuthority}"`);
+			backend.restartPtyHost();
+		}
+	}
+});
+
+class DevModeContribution extends Disposable implements ITerminalContribution {
+	static readonly ID = 'terminal.devMode';
+	static get(instance: ITerminalInstance): DevModeContribution | null {
+		return instance.getContribution<DevModeContribution>(DevModeContribution.ID);
+	}
+
+	private _xterm: IXtermTerminal & { raw: Terminal } | undefined;
+	private readonly _activeDevModeDisposables = new MutableDisposable();
+	private _currentColor = 0;
+
+	private _statusbarEntry: IStatusbarEntry | undefined;
+	private readonly _statusbarEntryAccessor: MutableDisposable<IStatusbarEntryAccessor> = this._register(new MutableDisposable());
+
+	constructor(
+		private readonly _instance: ITerminalInstance,
+		processManager: ITerminalProcessManager,
+		widgetManager: TerminalWidgetManager,
+		@IConfigurationService private readonly _configurationService: IConfigurationService,
+		@IStatusbarService private readonly _statusbarService: IStatusbarService,
+	) {
+		super();
+		this._register(this._configurationService.onDidChangeConfiguration(e => {
+			if (e.affectsConfiguration(TerminalSettingId.DevMode)) {
+				this._updateDevMode();
+			}
+		}));
+	}
+
+	xtermReady(xterm: IXtermTerminal & { raw: Terminal }): void {
+		this._xterm = xterm;
+		this._updateDevMode();
+	}
+
+	private _updateDevMode() {
+		const devMode: boolean = this._isEnabled();
+		this._xterm?.raw.element?.classList.toggle('dev-mode', devMode);
+
+		const commandDetection = this._instance.capabilities.get(TerminalCapability.CommandDetection);
+		if (devMode) {
+			if (commandDetection) {
+				const commandDecorations = new Map<ITerminalCommand, IDisposable[]>();
+				this._activeDevModeDisposables.value = combinedDisposable(
+					// Prompt input
+					this._instance.onDidBlur(() => this._updateDevMode()),
+					this._instance.onDidFocus(() => this._updateDevMode()),
+					commandDetection.promptInputModel.onDidChangeInput(() => this._updateDevMode()),
+					// Sequence markers
+					commandDetection.onCommandFinished(command => {
+						const colorClass = `color-${this._currentColor}`;
+						const decorations: IDisposable[] = [];
+						commandDecorations.set(command, decorations);
+						if (command.promptStartMarker) {
+							const d = this._instance.xterm!.raw?.registerDecoration({
+								marker: command.promptStartMarker
+							});
+							if (d) {
+								decorations.push(d);
+								d.onRender(e => {
+									e.textContent = 'A';
+									e.classList.add('xterm-sequence-decoration', 'top', 'left', colorClass);
+								});
+							}
+						}
+						if (command.marker) {
+							const d = this._instance.xterm!.raw?.registerDecoration({
+								marker: command.marker,
+								x: command.startX
+							});
+							if (d) {
+								decorations.push(d);
+								d.onRender(e => {
+									e.textContent = 'B';
+									e.classList.add('xterm-sequence-decoration', 'top', 'right', colorClass);
+								});
+							}
+						}
+						if (command.executedMarker) {
+							const d = this._instance.xterm!.raw?.registerDecoration({
+								marker: command.executedMarker,
+								x: command.executedX
+							});
+							if (d) {
+								decorations.push(d);
+								d.onRender(e => {
+									e.textContent = 'C';
+									e.classList.add('xterm-sequence-decoration', 'bottom', 'left', colorClass);
+								});
+							}
+						}
+						if (command.endMarker) {
+							const d = this._instance.xterm!.raw?.registerDecoration({
+								marker: command.endMarker
+							});
+							if (d) {
+								decorations.push(d);
+								d.onRender(e => {
+									e.textContent = 'D';
+									e.classList.add('xterm-sequence-decoration', 'bottom', 'right', colorClass);
+								});
+							}
+						}
+						this._currentColor = (this._currentColor + 1) % 2;
+					}),
+					commandDetection.onCommandInvalidated(commands => {
+						for (const c of commands) {
+							const decorations = commandDecorations.get(c);
+							if (decorations) {
+								dispose(decorations);
+							}
+							commandDecorations.delete(c);
+						}
+					})
+				);
+
+				this._updatePromptInputStatusBar(commandDetection);
+			} else {
+				this._activeDevModeDisposables.value = this._instance.capabilities.onDidAddCapabilityType(e => {
+					if (e === TerminalCapability.CommandDetection) {
+						this._updateDevMode();
+					}
+				});
+			}
+		} else {
+			this._activeDevModeDisposables.clear();
+		}
+	}
+
+	private _isEnabled(): boolean {
+		return this._configurationService.getValue(TerminalSettingId.DevMode) || false;
+	}
+
+	private _updatePromptInputStatusBar(commandDetection: ICommandDetectionCapability) {
+		const promptInputModel = commandDetection.promptInputModel;
+		if (promptInputModel) {
+			const name = localize('terminalDevMode', 'Terminal Dev Mode');
+			const isExecuting = promptInputModel.cursorIndex === -1;
+			this._statusbarEntry = {
+				name,
+				text: `$(${isExecuting ? 'loading~spin' : 'terminal'}) ${promptInputModel.getCombinedString()}`,
+				ariaLabel: name,
+				tooltip: 'The detected terminal prompt input',
+				kind: 'prominent'
+			};
+			if (!this._statusbarEntryAccessor.value) {
+				this._statusbarEntryAccessor.value = this._statusbarService.addEntry(this._statusbarEntry, `terminal.promptInput.${this._instance.instanceId}`, StatusbarAlignment.LEFT);
+			} else {
+				this._statusbarEntryAccessor.value.update(this._statusbarEntry);
+			}
+			this._statusbarService.updateEntryVisibility(`terminal.promptInput.${this._instance.instanceId}`, this._instance.hasFocus);
+		}
+	}
+}
+
+registerTerminalContribution(DevModeContribution.ID, DevModeContribution);

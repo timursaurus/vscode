@@ -72,6 +72,7 @@ export interface IFileQueryBuilderOptions extends ICommonQueryBuilderOptions {
 	exists?: boolean;
 	sortByScore?: boolean;
 	cacheKey?: string;
+	shouldGlobSearch?: boolean;
 }
 
 export interface ITextQueryBuilderOptions extends ICommonQueryBuilderOptions {
@@ -188,6 +189,7 @@ export class QueryBuilder {
 			exists: options.exists,
 			sortByScore: options.sortByScore,
 			cacheKey: options.cacheKey,
+			shouldGlobMatchFilePattern: options.shouldGlobSearch
 		};
 	}
 
@@ -226,7 +228,7 @@ export class QueryBuilder {
 		};
 
 		if (options.onlyOpenEditors) {
-			const openEditors = arrays.coalesce(arrays.flatten(this.editorGroupsService.groups.map(group => group.editors.map(editor => editor.resource))));
+			const openEditors = arrays.coalesce(this.editorGroupsService.groups.flatMap(group => group.editors.map(editor => editor.resource)));
 			this.logService.trace('QueryBuilder#commonQuery - openEditor URIs', JSON.stringify(openEditors));
 			const openEditorsInQuery = openEditors.filter(editor => pathIncludedInQuery(queryProps, editor.fsPath));
 			const openEditorsQueryProps = this.commonQueryFromFileList(openEditorsInQuery);
@@ -356,7 +358,7 @@ export class QueryBuilder {
 			result.searchPaths = searchPaths;
 		}
 
-		const exprSegments = arrays.flatten(expandedExprSegments);
+		const exprSegments = expandedExprSegments.flat();
 		const includePattern = patternListToIExpression(...exprSegments);
 		if (includePattern) {
 			result.pattern = includePattern;

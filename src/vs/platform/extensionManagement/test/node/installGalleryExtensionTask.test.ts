@@ -14,6 +14,7 @@ import { isBoolean } from 'vs/base/common/types';
 import { URI } from 'vs/base/common/uri';
 import { generateUuid } from 'vs/base/common/uuid';
 import { mock } from 'vs/base/test/common/mock';
+import { ensureNoDisposablesAreLeakedInTestSuite } from 'vs/base/test/common/utils';
 import { IConfigurationService } from 'vs/platform/configuration/common/configuration';
 import { TestConfigurationService } from 'vs/platform/configuration/test/common/testConfigurationService';
 import { INativeEnvironmentService } from 'vs/platform/environment/common/environment';
@@ -47,8 +48,7 @@ class TestExtensionsScanner extends mock<ExtensionsScanner>() {
 class TestExtensionSignatureVerificationService extends mock<IExtensionSignatureVerificationService>() {
 
 	constructor(
-		private readonly verificationResult: string | boolean,
-		private readonly didExecute: boolean) {
+		private readonly verificationResult: string | boolean) {
 		super();
 	}
 
@@ -58,7 +58,6 @@ class TestExtensionSignatureVerificationService extends mock<IExtensionSignature
 		}
 		const error = Error(this.verificationResult);
 		(error as any).code = this.verificationResult;
-		(error as any).didExecute = this.didExecute;
 		throw error;
 	}
 }
@@ -70,12 +69,13 @@ class TestInstallGalleryExtensionTask extends InstallGalleryExtensionTask {
 	constructor(
 		extension: IGalleryExtension,
 		extensionDownloader: ExtensionsDownloader,
+		disposables: DisposableStore,
 	) {
-		const instantiationService = new TestInstantiationService();
+		const instantiationService = disposables.add(new TestInstantiationService());
 		const logService = instantiationService.stub(ILogService, new NullLogService());
-		const fileService = instantiationService.stub(IFileService, new FileService(logService));
-		const fileSystemProvider = new InMemoryFileSystemProvider();
-		fileService.registerProvider(ROOT.scheme, fileSystemProvider);
+		const fileService = instantiationService.stub(IFileService, disposables.add(new FileService(logService)));
+		const fileSystemProvider = disposables.add(new InMemoryFileSystemProvider());
+		disposables.add(fileService.registerProvider(ROOT.scheme, fileSystemProvider));
 		const systemExtensionsLocation = joinPath(ROOT, 'system');
 		const userExtensionsLocation = joinPath(ROOT, 'extensions');
 		instantiationService.stub(INativeEnvironmentService, {
@@ -88,10 +88,10 @@ class TestInstallGalleryExtensionTask extends InstallGalleryExtensionTask {
 		});
 		instantiationService.stub(IProductService, {});
 		instantiationService.stub(ITelemetryService, NullTelemetryService);
-		const uriIdentityService = instantiationService.stub(IUriIdentityService, instantiationService.createInstance(UriIdentityService));
-		const userDataProfilesService = instantiationService.stub(IUserDataProfilesService, instantiationService.createInstance(UserDataProfilesService));
-		const extensionsProfileScannerService = instantiationService.stub(IExtensionsProfileScannerService, instantiationService.createInstance(ExtensionsProfileScannerService));
-		const extensionsScannerService = instantiationService.stub(IExtensionsScannerService, instantiationService.createInstance(ExtensionsScannerService));
+		const uriIdentityService = instantiationService.stub(IUriIdentityService, disposables.add(instantiationService.createInstance(UriIdentityService)));
+		const userDataProfilesService = instantiationService.stub(IUserDataProfilesService, disposables.add(instantiationService.createInstance(UserDataProfilesService)));
+		const extensionsProfileScannerService = instantiationService.stub(IExtensionsProfileScannerService, disposables.add(instantiationService.createInstance(ExtensionsProfileScannerService)));
+		const extensionsScannerService = instantiationService.stub(IExtensionsScannerService, disposables.add(instantiationService.createInstance(ExtensionsScannerService)));
 		super(
 			{
 				name: extension.name,
@@ -100,7 +100,7 @@ class TestInstallGalleryExtensionTask extends InstallGalleryExtensionTask {
 				engines: { vscode: '*' },
 			},
 			extension,
-			{ profileLocation: userDataProfilesService.defaultProfile.extensionsResource },
+			{ profileLocation: userDataProfilesService.defaultProfile.extensionsResource, productVersion: { version: '' } },
 			extensionDownloader,
 			new TestExtensionsScanner(),
 			uriIdentityService,
@@ -108,6 +108,7 @@ class TestInstallGalleryExtensionTask extends InstallGalleryExtensionTask {
 			extensionsScannerService,
 			extensionsProfileScannerService,
 			logService,
+			NullTelemetryService
 		);
 	}
 
@@ -126,12 +127,10 @@ class TestInstallGalleryExtensionTask extends InstallGalleryExtensionTask {
 
 suite('InstallGalleryExtensionTask Tests', () => {
 
-	const disposables = new DisposableStore();
-
-	teardown(() => disposables.clear());
+	const disposables = ensureNoDisposablesAreLeakedInTestSuite();
 
 	test('if verification is enabled by default, the task completes', async () => {
-		const testObject = new TestInstallGalleryExtensionTask(aGalleryExtension('a', { isSigned: true }), anExtensionsDownloader({ isSignatureVerificationEnabled: true, verificationResult: true, didExecute: true }));
+		const testObject = new TestInstallGalleryExtensionTask(aGalleryExtension('a', { isSigned: true }), anExtensionsDownloader({ isSignatureVerificationEnabled: true, verificationResult: true }), disposables.add(new DisposableStore()));
 
 		await testObject.run();
 
@@ -140,7 +139,7 @@ suite('InstallGalleryExtensionTask Tests', () => {
 	});
 
 	test('if verification is enabled in stable, the task completes', async () => {
-		const testObject = new TestInstallGalleryExtensionTask(aGalleryExtension('a', { isSigned: true }), anExtensionsDownloader({ isSignatureVerificationEnabled: true, verificationResult: true, didExecute: true, quality: 'stable' }));
+		const testObject = new TestInstallGalleryExtensionTask(aGalleryExtension('a', { isSigned: true }), anExtensionsDownloader({ isSignatureVerificationEnabled: true, verificationResult: true, quality: 'stable' }), disposables.add(new DisposableStore()));
 
 		await testObject.run();
 
@@ -149,7 +148,7 @@ suite('InstallGalleryExtensionTask Tests', () => {
 	});
 
 	test('if verification is disabled by setting set to false, the task skips verification', async () => {
-		const testObject = new TestInstallGalleryExtensionTask(aGalleryExtension('a', { isSigned: true }), anExtensionsDownloader({ isSignatureVerificationEnabled: false, verificationResult: 'error', didExecute: false }));
+		const testObject = new TestInstallGalleryExtensionTask(aGalleryExtension('a', { isSigned: true }), anExtensionsDownloader({ isSignatureVerificationEnabled: false, verificationResult: 'error' }), disposables.add(new DisposableStore()));
 
 		await testObject.run();
 
@@ -158,7 +157,7 @@ suite('InstallGalleryExtensionTask Tests', () => {
 	});
 
 	test('if verification is disabled because the module is not loaded, the task skips verification', async () => {
-		const testObject = new TestInstallGalleryExtensionTask(aGalleryExtension('a', { isSigned: true }), anExtensionsDownloader({ isSignatureVerificationEnabled: true, verificationResult: false, didExecute: false }));
+		const testObject = new TestInstallGalleryExtensionTask(aGalleryExtension('a', { isSigned: true }), anExtensionsDownloader({ isSignatureVerificationEnabled: true, verificationResult: false }), disposables.add(new DisposableStore()));
 
 		await testObject.run();
 
@@ -168,7 +167,7 @@ suite('InstallGalleryExtensionTask Tests', () => {
 
 	test('if verification fails to execute, the task completes', async () => {
 		const errorCode = 'ENOENT';
-		const testObject = new TestInstallGalleryExtensionTask(aGalleryExtension('a', { isSigned: true }), anExtensionsDownloader({ isSignatureVerificationEnabled: true, verificationResult: errorCode, didExecute: false }));
+		const testObject = new TestInstallGalleryExtensionTask(aGalleryExtension('a', { isSigned: true }), anExtensionsDownloader({ isSignatureVerificationEnabled: true, verificationResult: errorCode }), disposables.add(new DisposableStore()));
 
 		await testObject.run();
 
@@ -179,7 +178,7 @@ suite('InstallGalleryExtensionTask Tests', () => {
 	test('if verification fails', async () => {
 		const errorCode = 'IntegrityCheckFailed';
 
-		const testObject = new TestInstallGalleryExtensionTask(aGalleryExtension('a', { isSigned: true }), anExtensionsDownloader({ isSignatureVerificationEnabled: true, verificationResult: errorCode, didExecute: true }));
+		const testObject = new TestInstallGalleryExtensionTask(aGalleryExtension('a', { isSigned: true }), anExtensionsDownloader({ isSignatureVerificationEnabled: true, verificationResult: errorCode }), disposables.add(new DisposableStore()));
 
 		await testObject.run();
 
@@ -188,7 +187,7 @@ suite('InstallGalleryExtensionTask Tests', () => {
 	});
 
 	test('if verification succeeds, the task completes', async () => {
-		const testObject = new TestInstallGalleryExtensionTask(aGalleryExtension('a', { isSigned: true }), anExtensionsDownloader({ isSignatureVerificationEnabled: true, verificationResult: true, didExecute: true }));
+		const testObject = new TestInstallGalleryExtensionTask(aGalleryExtension('a', { isSigned: true }), anExtensionsDownloader({ isSignatureVerificationEnabled: true, verificationResult: true }), disposables.add(new DisposableStore()));
 
 		await testObject.run();
 
@@ -197,7 +196,7 @@ suite('InstallGalleryExtensionTask Tests', () => {
 	});
 
 	test('task completes for unsigned extension', async () => {
-		const testObject = new TestInstallGalleryExtensionTask(aGalleryExtension('a', { isSigned: false }), anExtensionsDownloader({ isSignatureVerificationEnabled: true, verificationResult: true, didExecute: false }));
+		const testObject = new TestInstallGalleryExtensionTask(aGalleryExtension('a', { isSigned: false }), anExtensionsDownloader({ isSignatureVerificationEnabled: true, verificationResult: true }), disposables.add(new DisposableStore()));
 
 		await testObject.run();
 
@@ -206,7 +205,7 @@ suite('InstallGalleryExtensionTask Tests', () => {
 	});
 
 	test('task completes for an unsigned extension even when signature verification throws error', async () => {
-		const testObject = new TestInstallGalleryExtensionTask(aGalleryExtension('a', { isSigned: false }), anExtensionsDownloader({ isSignatureVerificationEnabled: true, verificationResult: 'error', didExecute: true }));
+		const testObject = new TestInstallGalleryExtensionTask(aGalleryExtension('a', { isSigned: false }), anExtensionsDownloader({ isSignatureVerificationEnabled: true, verificationResult: 'error' }), disposables.add(new DisposableStore()));
 
 		await testObject.run();
 
@@ -214,18 +213,18 @@ suite('InstallGalleryExtensionTask Tests', () => {
 		assert.strictEqual(testObject.installed, true);
 	});
 
-	function anExtensionsDownloader(options: { isSignatureVerificationEnabled: boolean; verificationResult: boolean | string; didExecute: boolean; quality?: string }): ExtensionsDownloader {
+	function anExtensionsDownloader(options: { isSignatureVerificationEnabled: boolean; verificationResult: boolean | string; quality?: string }): ExtensionsDownloader {
 		const logService = new NullLogService();
 		const fileService = disposables.add(new FileService(logService));
 		const fileSystemProvider = disposables.add(new InMemoryFileSystemProvider());
-		fileService.registerProvider(ROOT.scheme, fileSystemProvider);
+		disposables.add(fileService.registerProvider(ROOT.scheme, fileSystemProvider));
 
-		const instantiationService = new TestInstantiationService();
+		const instantiationService = disposables.add(new TestInstantiationService());
 		instantiationService.stub(IProductService, { quality: options.quality ?? 'insiders' });
 		instantiationService.stub(IFileService, fileService);
 		instantiationService.stub(ILogService, logService);
-		instantiationService.stub(INativeEnvironmentService, <Partial<INativeEnvironmentService>>{ extensionsDownloadLocation: joinPath(ROOT, 'CachedExtensionVSIXs') });
-		instantiationService.stub(IExtensionGalleryService, <Partial<IExtensionGalleryService>>{
+		instantiationService.stub(INativeEnvironmentService, { extensionsDownloadLocation: joinPath(ROOT, 'CachedExtensionVSIXs') });
+		instantiationService.stub(IExtensionGalleryService, {
 			async download(extension, location, operation) {
 				await fileService.writeFile(location, VSBuffer.fromString('extension vsix'));
 			},
@@ -234,8 +233,8 @@ suite('InstallGalleryExtensionTask Tests', () => {
 			},
 		});
 		instantiationService.stub(IConfigurationService, new TestConfigurationService(isBoolean(options.isSignatureVerificationEnabled) ? { extensions: { verifySignature: options.isSignatureVerificationEnabled } } : undefined));
-		instantiationService.stub(IExtensionSignatureVerificationService, new TestExtensionSignatureVerificationService(options.verificationResult, !!options.didExecute));
-		return instantiationService.createInstance(ExtensionsDownloader);
+		instantiationService.stub(IExtensionSignatureVerificationService, new TestExtensionSignatureVerificationService(options.verificationResult));
+		return disposables.add(instantiationService.createInstance(ExtensionsDownloader));
 	}
 
 	function aGalleryExtension(name: string, properties: Partial<IGalleryExtension> = {}, galleryExtensionProperties: any = {}, assets: Partial<IGalleryExtensionAssets> = {}): IGalleryExtension {

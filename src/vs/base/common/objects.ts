@@ -177,6 +177,9 @@ export function safeStringify(obj: any): string {
 				seen.add(value);
 			}
 		}
+		if (typeof value === 'bigint') {
+			return `[BigInt ${value.toString()}]`;
+		}
 		return value;
 	});
 }
@@ -230,10 +233,9 @@ export function filter(obj: obj, predicate: (key: string, value: any) => boolean
 
 export function getAllPropertyNames(obj: object): string[] {
 	let res: string[] = [];
-	let proto = Object.getPrototypeOf(obj);
-	while (Object.prototype !== proto) {
-		res = res.concat(Object.getOwnPropertyNames(proto));
-		proto = Object.getPrototypeOf(proto);
+	while (Object.prototype !== obj) {
+		res = res.concat(Object.getOwnPropertyNames(obj));
+		obj = Object.getPrototypeOf(obj);
 	}
 	return res;
 }

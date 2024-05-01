@@ -4,33 +4,47 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { CancellationToken } from 'vs/base/common/cancellation';
+import { Codicon } from 'vs/base/common/codicons';
 import { Emitter } from 'vs/base/common/event';
-import { Disposable } from 'vs/base/common/lifecycle';
+import { Disposable, toDisposable } from 'vs/base/common/lifecycle';
 import { Schemas } from 'vs/base/common/network';
+import { ThemeIcon } from 'vs/base/common/themables';
 import { URI } from 'vs/base/common/uri';
 import * as nls from 'vs/nls';
-import { IEditorModel } from 'vs/platform/editor/common/editor';
 import { IInstantiationService } from 'vs/platform/instantiation/common/instantiation';
+import { registerIcon } from 'vs/platform/theme/common/iconRegistry';
 import { EditorInputCapabilities, IEditorSerializer, IUntypedEditorInput } from 'vs/workbench/common/editor';
 import { EditorInput } from 'vs/workbench/common/editor/editorInput';
 import type { IChatEditorOptions } from 'vs/workbench/contrib/chat/browser/chatEditor';
+import { ChatAgentLocation } from 'vs/workbench/contrib/chat/common/chatAgents';
 import { IChatModel } from 'vs/workbench/contrib/chat/common/chatModel';
 import { IChatService } from 'vs/workbench/contrib/chat/common/chatService';
 
+const ChatEditorIcon = registerIcon('chat-editor-label-icon', Codicon.commentDiscussion, nls.localize('chatEditorLabelIcon', 'Icon of the chat editor label.'));
+
 export class ChatEditorInput extends EditorInput {
+	static readonly countsInUse = new Set<number>();
+
 	static readonly TypeID: string = 'workbench.input.chatSession';
 	static readonly EditorID: string = 'workbench.editor.chatSession';
-	static count = 0;
 
 	private readonly inputCount: number;
 	public sessionId: string | undefined;
-	public providerId: string | undefined;
 
 	private model: IChatModel | undefined;
 
 	static getNewEditorUri(): URI {
 		const handle = Math.floor(Math.random() * 1e9);
 		return ChatUri.generate(handle);
+	}
+
+	static getNextCount(): number {
+		let count = 0;
+		while (ChatEditorInput.countsInUse.has(count)) {
+			count++;
+		}
+
+		return count;
 	}
 
 	constructor(
@@ -45,9 +59,12 @@ export class ChatEditorInput extends EditorInput {
 			throw new Error('Invalid chat URI');
 		}
 
-		this.sessionId = 'sessionId' in options.target ? options.target.sessionId : undefined;
-		this.providerId = 'providerId' in options.target ? options.target.providerId : undefined;
-		this.inputCount = ChatEditorInput.count++;
+		this.sessionId = (options.target && 'sessionId' in options.target) ?
+			options.target.sessionId :
+			undefined;
+		this.inputCount = ChatEditorInput.getNextCount();
+		ChatEditorInput.countsInUse.add(this.inputCount);
+		this._register(toDisposable(() => ChatEditorInput.countsInUse.delete(this.inputCount)));
 	}
 
 	override get editorId(): string | undefined {
@@ -70,15 +87,15 @@ export class ChatEditorInput extends EditorInput {
 		return this.model?.title || nls.localize('chatEditorName', "Chat") + (this.inputCount > 0 ? ` ${this.inputCount + 1}` : '');
 	}
 
-	override getLabelExtraClasses(): string[] {
-		return ['chat-editor-label'];
+	override getIcon(): ThemeIcon {
+		return ChatEditorIcon;
 	}
 
 	override async resolve(): Promise<ChatEditorModel | null> {
 		if (typeof this.sessionId === 'string') {
 			this.model = this.chatService.getOrRestoreSession(this.sessionId);
-		} else if (typeof this.providerId === 'string') {
-			this.model = this.chatService.startSession(this.providerId, CancellationToken.None);
+		} else if (!this.options.target) {
+			this.model = this.chatService.startSession(ChatAgentLocation.Panel, CancellationToken.None);
 		} else if ('data' in this.options.target) {
 			this.model = this.chatService.loadSessionFromContent(this.options.target.data);
 		}
@@ -88,8 +105,6 @@ export class ChatEditorInput extends EditorInput {
 		}
 
 		this.sessionId = this.model.sessionId;
-		this.providerId = this.model.providerId;
-		await this.model.waitForInitialization();
 		this._register(this.model.onDidChange(() => this._onDidChangeLabel.fire()));
 
 		return this._register(new ChatEditorModel(this.model));
@@ -103,7 +118,7 @@ export class ChatEditorInput extends EditorInput {
 	}
 }
 
-export class ChatEditorModel extends Disposable implements IEditorModel {
+export class ChatEditorModel extends Disposable {
 	private _onWillDispose = this._register(new Emitter<void>());
 	readonly onWillDispose = this._onWillDispose.event;
 
@@ -168,16 +183,12 @@ interface ISerializedChatEditorInput {
 }
 
 export class ChatEditorInputSerializer implements IEditorSerializer {
-	canSerialize(input: EditorInput): boolean {
-		return input instanceof ChatEditorInput;
+	canSerialize(input: EditorInput): input is ChatEditorInput & { readonly sessionId: string } {
+		return input instanceof ChatEditorInput && typeof input.sessionId === 'string';
 	}
 
 	serialize(input: EditorInput): string | undefined {
-		if (!(input instanceof ChatEditorInput)) {
-			return undefined;
-		}
-
-		if (typeof input.sessionId !== 'string') {
+		if (!this.canSerialize(input)) {
 			return undefined;
 		}
 
